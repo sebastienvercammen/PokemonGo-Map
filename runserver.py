@@ -273,7 +273,7 @@ def main():
         log.debug('Starting db-updater worker thread %d', i)
         t = StoppableThread(target=db_updater, name='db-updater-{}'.format(i),
                             args=(args, db_updates_queue, db))
-        db_updater_threads.push(t)
+        db_updater_threads.append(t)
         t.daemon = True
         t.start()
 
@@ -297,7 +297,7 @@ def main():
         log.debug('Starting wh-updater worker thread %d', i)
         t = StoppableThread(target=wh_updater, name='wh-updater-{}'.format(i),
                             args=(args, wh_updates_queue, wh_key_cache))
-        wh_updater_threads.push(t)
+        wh_updater_threads.append(t)
         t.daemon = True
         t.start()
 
