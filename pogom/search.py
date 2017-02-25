@@ -44,7 +44,7 @@ from pgoapi.hash_server import HashServer
 from .models import parse_map, GymDetails, parse_gyms, MainWorker, WorkerStatus
 from .fakePogoApi import FakePogoApi
 from .utils import now, generate_device_info, stop_threads
-from .extra import StoppableThread
+from .extra.utilclasses import StoppableThread
 from .transform import get_new_coords, jitter_location
 from .account import check_login, get_tutorial_state, complete_tutorial
 from .captcha import captcha_overseer_thread, handle_captcha

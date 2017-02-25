@@ -28,7 +28,7 @@ from .transform import jitter_location
 from .account import check_login
 from .proxy import get_new_proxy
 from .utils import now, stop_threads
-from .extra import StoppableThread
+from .extra.utilclasses import StoppableThread
 
 
 log = logging.getLogger(__name__)
