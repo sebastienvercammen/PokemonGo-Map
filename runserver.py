@@ -102,9 +102,6 @@ def install_thread_excepthook():
     def run(*args, **kwargs):
         try:
             run_old(*args, **kwargs)
-        except (KeyboardInterrupt, SystemExit, EOFError):
-            # EOFError happens in status_printer's raw_input on CTRL+C.
-            raise
         except:
             sys.excepthook(*sys.exc_info())
     Thread.run = run
@@ -407,4 +404,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.debug('Unhandled exception in main.')
+        log.exception(e)
