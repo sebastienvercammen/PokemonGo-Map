@@ -670,7 +670,8 @@ class SpeedScan(HexSearch):
                          'or %.1f%% complete', bands_filled, bands_total,
                          percent)
             return percent
-
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
             log.error(
                 'Exception in band_status: Exception message: {}'.format(
@@ -851,6 +852,8 @@ class SpeedScan(HexSearch):
                                                           good_percent)
                 self._stat_init()
 
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception as e:
                 log.error(
                     'Performance statistics had an Exception: {}'.format(

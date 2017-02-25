@@ -31,7 +31,7 @@ if __name__ == '__main__':
     print time.asctime(), "Server Starts - %s:%s" % (HOST_NAME, HOST_PORT)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     httpd.server_close()
     print time.asctime(), "Server Stops - %s:%s" % (HOST_NAME, HOST_PORT)

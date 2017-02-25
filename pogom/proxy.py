@@ -5,9 +5,9 @@ import logging
 import requests
 import sys
 import time
+import threading
 
 from queue import Queue
-from threading import Thread
 from random import randint
 
 log = logging.getLogger(__name__)
@@ -139,10 +139,10 @@ def check_proxies(args):
     for proxy in enumerate(source_proxies):
         proxy_queue.put(proxy)
 
-        t = Thread(target=check_proxy,
-                   name='check_proxy',
-                   args=(proxy_queue, args.proxy_timeout, proxies,
-                         total_proxies <= 10, check_results))
+        t = threading.Thread(target=check_proxy,
+                             name='check_proxy',
+                             args=(proxy_queue, args.proxy_timeout, proxies,
+                                   total_proxies <= 10, check_results))
         t.daemon = True
         t.start()
 
@@ -172,8 +172,10 @@ def check_proxies(args):
 
 # Thread function for periodical proxy updating.
 def proxies_refresher(args):
+    thread = threading.current_thread()
 
-    while True:
+    # The forever loop.
+    while not thread.stopped():
         # Wait BEFORE refresh, because initial refresh is done at startup.
         time.sleep(args.proxy_refresh)
 

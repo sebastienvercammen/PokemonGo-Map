@@ -20,10 +20,12 @@ from flask_cache_bust import init_cache_busting
 
 from pogom import config
 from pogom.app import Pogom
-from pogom.utils import get_args, now, extract_sprites
+from pogom.utils import get_args, now, extract_sprites, stop_threads
+from pogom.extra import StoppableThread
 from pogom.altitude import get_gmaps_altitude
 
 from pogom.search import search_overseer_thread
+
 from pogom.models import (init_database, create_tables, drop_tables,
                           Pokemon, db_updater, clean_db_loop)
 from pogom.webhook import wh_updater
@@ -125,6 +127,13 @@ def main():
     sys.excepthook = handle_exception
 
     args = get_args()
+
+    # List of all types of threads we start, for clarity & graceful handling.
+    wh_updater_threads = []
+    db_updater_threads = []
+    db_cleaner_thread = None
+    proxy_refresher_thread = None
+    search_thread = None
 
     # Add file logging if enabled.
     if args.verbose and args.verbose != 'nofile':
@@ -262,16 +271,19 @@ def main():
     # Thread(s) to process database updates.
     for i in range(args.db_threads):
         log.debug('Starting db-updater worker thread %d', i)
-        t = Thread(target=db_updater, name='db-updater-{}'.format(i),
-                   args=(args, db_updates_queue, db))
+        t = StoppableThread(target=db_updater, name='db-updater-{}'.format(i),
+                            args=(args, db_updates_queue, db))
+        db_updater_threads.push(t)
         t.daemon = True
         t.start()
 
     # db cleaner; really only need one ever.
     if not args.disable_clean:
-        t = Thread(target=clean_db_loop, name='db-cleaner', args=(args,))
-        t.daemon = True
-        t.start()
+        db_cleaner_thread = StoppableThread(target=clean_db_loop,
+                                            name='db-cleaner',
+                                            args=(args,))
+        db_cleaner_thread.daemon = True
+        db_cleaner_thread.start()
 
     # WH updates queue & WH gym/pokéstop unique key LFU cache.
     # The LFU cache will stop the server from resending the same data an
@@ -283,8 +295,9 @@ def main():
     # Thread to process webhook updates.
     for i in range(args.wh_threads):
         log.debug('Starting wh-updater worker thread %d', i)
-        t = Thread(target=wh_updater, name='wh-updater-{}'.format(i),
-                   args=(args, wh_updates_queue, wh_key_cache))
+        t = StoppableThread(target=wh_updater, name='wh-updater-{}'.format(i),
+                            args=(args, wh_updates_queue, wh_key_cache))
+        wh_updater_threads.push(t)
         t.daemon = True
         t.start()
 
@@ -296,10 +309,11 @@ def main():
 
         # Run periodical proxy refresh thread
         if (args.proxy_file is not None) and (args.proxy_refresh > 0):
-            t = Thread(target=proxies_refresher,
-                       name='proxy-refresh', args=(args,))
-            t.daemon = True
-            t.start()
+            proxy_refresher_thread = StoppableThread(target=proxies_refresher,
+                                                     name='proxy-refresh',
+                                                     args=(args,))
+            proxy_refresher_thread.daemon = True
+            proxy_refresher_thread.start()
         else:
             log.info('Periodical proxies refresh disabled.')
 
@@ -321,8 +335,8 @@ def main():
                   heartbeat, db_updates_queue, wh_updates_queue)
 
         log.debug('Starting a %s search thread', args.scheduler)
-        search_thread = Thread(target=search_overseer_thread,
-                               name='search-overseer', args=argset)
+        search_thread = StoppableThread(target=search_overseer_thread,
+                                        name='search-overseer', args=argset)
         search_thread.daemon = True
         search_thread.start()
 
@@ -339,26 +353,56 @@ def main():
     config['ROOT_PATH'] = app.root_path
     config['GMAPS_KEY'] = args.gmaps_key
 
-    if args.no_server:
-        # This loop allows for ctrl-c interupts to work since flask won't be
-        # holding the program open.
-        while search_thread.is_alive():
-            time.sleep(60)
-    else:
-        ssl_context = None
-        if (args.ssl_certificate and args.ssl_privatekey and
-                os.path.exists(args.ssl_certificate) and
-                os.path.exists(args.ssl_privatekey)):
-            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-            ssl_context.load_cert_chain(
-                args.ssl_certificate, args.ssl_privatekey)
-            log.info('Web server in SSL mode.')
-        if args.verbose or args.very_verbose:
-            app.run(threaded=True, use_reloader=False, debug=True,
-                    host=args.host, port=args.port, ssl_context=ssl_context)
+    try:
+        if args.no_server:
+            # This loop allows for ctrl-c interupts to work since flask won't
+            # hold the program open.
+            while search_thread.is_alive():
+                time.sleep(60)
         else:
-            app.run(threaded=True, use_reloader=False, debug=False,
-                    host=args.host, port=args.port, ssl_context=ssl_context)
+            ssl_context = None
+            if (args.ssl_certificate and args.ssl_privatekey and
+                    os.path.exists(args.ssl_certificate) and
+                    os.path.exists(args.ssl_privatekey)):
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+                ssl_context.load_cert_chain(
+                    args.ssl_certificate, args.ssl_privatekey)
+                log.info('Web server in SSL mode.')
+            if args.verbose or args.very_verbose:
+                app.run(threaded=True, use_reloader=False, debug=True,
+                        host=args.host, port=args.port,
+                        ssl_context=ssl_context)
+            else:
+                app.run(threaded=True, use_reloader=False, debug=False,
+                        host=args.host, port=args.port,
+                        ssl_context=ssl_context)
+    except (KeyboardInterrupt, SystemExit):
+        # Graceful stop.
+        log.debug('Stopping gracefully...')
+
+        # Pause scanner.
+        pause_bit.set()
+        log.debug('[GRACE] Set pause bit.')
+
+        # Unset threads, in reverse order of importance.
+        log.debug('[GRACE] Stopping proxy refresher thread...')
+        stop_threads(proxy_refresher_thread)
+
+        log.debug('[GRACE] Stopping db cleaner thread...')
+        stop_threads(db_cleaner_thread)
+
+        log.debug('[GRACE] Stopping webhook threads...')
+        stop_threads(wh_updater_threads)
+
+        log.debug('[GRACE] Stopping database threads...')
+        stop_threads(db_updater_threads)
+
+        log.debug('[GRACE] Stopping overseer thread...')
+        stop_threads(search_thread)
+
+        log.debug('[GRACE] Graceful stop success.')
+        sys.exit()
+        return  # Won't get here :)
 
 
 if __name__ == '__main__':

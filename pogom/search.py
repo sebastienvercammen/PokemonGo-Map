@@ -26,9 +26,10 @@ import random
 import time
 import copy
 import requests
+import threading
 
 from datetime import datetime
-from threading import Thread, Lock
+from threading import Lock
 from queue import Queue, Empty
 from sets import Set
 from collections import deque
@@ -42,7 +43,8 @@ from pgoapi.hash_server import HashServer
 
 from .models import parse_map, GymDetails, parse_gyms, MainWorker, WorkerStatus
 from .fakePogoApi import FakePogoApi
-from .utils import now, generate_device_info
+from .utils import now, generate_device_info, stop_threads
+from .extra import StoppableThread
 from .transform import get_new_coords, jitter_location
 from .account import check_login, get_tutorial_state, complete_tutorial
 from .captcha import captcha_overseer_thread, handle_captcha
@@ -68,7 +70,10 @@ def switch_status_printer(display_type, current_page, mainlog,
     if (logmode != 'logs'):
         mainlog.handlers[0].setLevel(logging.CRITICAL)
 
-    while True:
+    thread = threading.current_thread()
+
+    # The forever loop.
+    while not thread.stopped():
         # Wait for the user to press a key.
         command = raw_input()
 
@@ -114,13 +119,20 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue,
     loglevel = mainlog.getEffectiveLevel()
 
     # Start another thread to get user input.
-    t = Thread(target=switch_status_printer,
-               name='switch_status_printer',
-               args=(display_type, current_page, mainlog, loglevel, logmode))
-    t.daemon = True
-    t.start()
+    printer_thread = StoppableThread(target=switch_status_printer,
+                                     name='switch_status_printer',
+                                     args=(display_type,
+                                           current_page,
+                                           mainlog,
+                                           loglevel,
+                                           logmode))
+    printer_thread.daemon = True
+    printer_thread.start()
 
-    while True:
+    thread = threading.current_thread()
+
+    # The forever loop.
+    while not thread.stopped():
         time.sleep(1)
 
         if display_type[0] == 'logs':
@@ -279,15 +291,27 @@ def status_printer(threadStatus, search_items_queue_array, db_updates_queue,
         # Print status.
         print '\n'.join(status_text)
 
+    # Graceful stop.
+    stop_threads(printer_thread)
+
 
 # The account recycler monitors failed accounts and places them back in the
 #  account queue 2 hours after they failed.
 # This allows accounts that were soft banned to be retried after giving
 # them a chance to cool down.
 def account_recycler(args, accounts_queue, account_failures):
-    while True:
-        # Run once a minute.
-        time.sleep(60)
+    thread = threading.current_thread()
+
+    # The forever loop.
+    while not thread.stopped():
+        # Run once a minute, but don't forget to shut down when asked.
+        for i in range(0, 60 * 1000):  # Sleep 60s.
+            time.sleep(1 / 1000.0)  # Sleep 1ms.
+
+            # Exit early if the thread is stopped.
+            if thread.stopped():
+                return
+
         log.info('Account recycler running. Checking status of %d accounts.',
                  len(account_failures))
 
@@ -318,8 +342,10 @@ def account_recycler(args, accounts_queue, account_failures):
 
 
 def worker_status_db_thread(threads_status, name, db_updates_queue):
+    thread = threading.current_thread()
 
-    while True:
+    # The forever loop.
+    while not thread.stopped():
         workers = {}
         overseer = None
         for status in threads_status.values():
@@ -355,6 +381,13 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
     key_scheduler = None
     api_version = '0.57.2'
     api_check_time = 0
+
+    # List of threads to stop on graceful exit.
+    ps_thread = None
+    account_recycler_thread = None
+    captcha_thread = None
+    status_db_thread = None
+    worker_thread = None
 
     '''
     Create a queue of accounts for workers to pull from. When a worker has
@@ -394,39 +427,48 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
 
     if(args.print_status):
         log.info('Starting status printer thread...')
-        t = Thread(target=status_printer,
-                   name='status_printer',
-                   args=(threadStatus, search_items_queue_array,
-                         db_updates_queue, wh_queue, account_queue,
-                         account_failures, account_captchas,
-                         args.print_status, args.hash_key,
-                         key_scheduler))
-        t.daemon = True
-        t.start()
+        ps_thread = StoppableThread(target=status_printer,
+                                    name='status_printer',
+                                    args=(threadStatus,
+                                          search_items_queue_array,
+                                          db_updates_queue, wh_queue,
+                                          account_queue,
+                                          account_failures, account_captchas,
+                                          args.print_status, args.hash_key,
+                                          key_scheduler))
+        ps_thread.daemon = True
+        ps_thread.start()
 
     # Create account recycler thread.
     log.info('Starting account recycler thread...')
-    t = Thread(target=account_recycler, name='account-recycler',
-               args=(args, account_queue, account_failures))
-    t.daemon = True
-    t.start()
+    account_recycler_thread = StoppableThread(target=account_recycler,
+                                              name='account-recycler',
+                                              args=(args, account_queue,
+                                                    account_failures))
+    account_recycler_thread.daemon = True
+    account_recycler_thread.start()
 
     # Create captcha overseer thread.
     if args.captcha_solving:
         log.info('Starting captcha overseer thread...')
-        t = Thread(target=captcha_overseer_thread, name='captcha-overseer',
-                   args=(args, account_queue, account_captchas, key_scheduler,
-                         wh_queue))
-        t.daemon = True
-        t.start()
+        captcha_thread = StoppableThread(target=captcha_overseer_thread,
+                                         name='captcha-overseer',
+                                         args=(args, account_queue,
+                                               account_captchas,
+                                               key_scheduler,
+                                               wh_queue))
+        captcha_thread.daemon = True
+        captcha_thread.start()
 
     if args.status_name is not None:
         log.info('Starting status database thread...')
-        t = Thread(target=worker_status_db_thread,
-                   name='status_worker_db',
-                   args=(threadStatus, args.status_name, db_updates_queue))
-        t.daemon = True
-        t.start()
+        status_db_thread = StoppableThread(target=worker_status_db_thread,
+                                           name='status_worker_db',
+                                           args=(threadStatus,
+                                                 args.status_name,
+                                                 db_updates_queue))
+        status_db_thread.daemon = True
+        status_db_thread.start()
 
     # Create specified number of search_worker_thread.
     log.info('Starting search worker threads...')
@@ -461,14 +503,19 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
             'proxy_url': proxy_url,
         }
 
-        t = Thread(target=search_worker_thread,
-                   name='search-worker-{}'.format(i),
-                   args=(args, account_queue, account_failures,
-                         account_captchas, search_items_queue, pause_bit,
-                         threadStatus[workerId], db_updates_queue,
-                         wh_queue, scheduler, key_scheduler))
-        t.daemon = True
-        t.start()
+        worker_thread = StoppableThread(target=search_worker_thread,
+                                        name='search-worker-{}'.format(i),
+                                        args=(args, account_queue,
+                                              account_failures,
+                                              account_captchas,
+                                              search_items_queue,
+                                              pause_bit,
+                                              threadStatus[workerId],
+                                              db_updates_queue,
+                                              wh_queue, scheduler,
+                                              key_scheduler))
+        worker_thread.daemon = True
+        worker_thread.start()
 
     if not args.no_version_check:
         log.info('Enabling new API force Watchdog.')
@@ -482,9 +529,10 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
 
     stats_timer = 0
 
-    # The real work starts here but will halt on pause_bit.set().
-    while True:
+    thread = threading.current_thread()
 
+    # The real work starts here but will halt on pause_bit.set().
+    while not thread.stopped():
         if (args.on_demand_timeout > 0 and
                 (now() - args.on_demand_timeout) > heartb[0]):
             pause_bit.set()
@@ -526,6 +574,8 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
                     'Search queue %d empty, scheduling more items to scan.', i)
                 try:  # Can't have the scheduler die because of a DB deadlock.
                     scheduler_array[i].schedule()
+                except (KeyboardInterrupt, SystemExit):
+                    raise
                 except Exception as e:
                     log.error(
                         'Schedule creation had an Exception: {}.'.format(
@@ -565,6 +615,13 @@ def search_overseer_thread(args, new_location_queue, pause_bit, heartb,
 
         # Now we just give a little pause here.
         time.sleep(1)
+
+    # Thread stopped.
+    stop_threads(ps_thread)
+    stop_threads(account_recycler_thread)
+    stop_threads(captcha_thread)
+    stop_threads(status_db_thread)
+    stop_threads(worker_thread)
 
 
 def get_scheduler_tth_found_pct(scheduler):
@@ -731,7 +788,9 @@ def search_worker_thread(args, account_queue, account_failures,
     # intentionally exited - which should only be done when the worker
     # is failing too often, and probably banned.
     # This reinitializes the API and grabs a new account from the queue.
-    while True:
+    thread = threading.current_thread()
+
+    while not thread.stopped():
         try:
             # Force storing of previous worker info to keep consistency
             if 'starttime' in status:
@@ -802,8 +861,8 @@ def search_worker_thread(args, account_queue, account_failures,
                     'http': status['proxy_url'],
                     'https': status['proxy_url']})
 
-            # The forever loop for the searches.
-            while True:
+            # The forever loop.
+            while not thread.stopped():
 
                 while pause_bit.is_set():
                     status['message'] = 'Scanning paused.'
@@ -1002,6 +1061,8 @@ def search_worker_thread(args, account_queue, account_failures,
                         step_location[0], step_location[1],
                         parsed['count'])
                     log.debug(status['message'])
+                except (KeyboardInterrupt, SystemExit):
+                    raise
                 except Exception as e:
                     parsed = False
                     status['fail'] += 1
@@ -1123,6 +1184,8 @@ def search_worker_thread(args, account_queue, account_failures,
                 time.sleep(delay)
 
         # Catch any process exceptions, log them, and continue the thread.
+        except (KeyboardInterrupt, SystemExit):
+            raise
         except Exception as e:
             log.error((
                 'Exception in search_worker under account {} Exception ' +
@@ -1167,6 +1230,8 @@ def map_request(api, position, no_jitter=False):
         response = req.call()
         return response
 
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except Exception as e:
         log.warning('Exception while downloading map: %s', repr(e))
         return False
@@ -1269,6 +1334,6 @@ def get_api_version(args):
             verify=False)
         return r.text[2:] if (r.status_code == requests.codes.ok and
                               r.text[2:].count('.') == 2) else 0
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         log.warning('error on API check: %s', repr(e))
         return 0

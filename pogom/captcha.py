@@ -16,9 +16,9 @@
 import logging
 import time
 import requests
+import threading
 
 from datetime import datetime
-from threading import Thread
 
 from pgoapi import PGoApi
 from .fakePogoApi import FakePogoApi
@@ -27,7 +27,8 @@ from .models import Token
 from .transform import jitter_location
 from .account import check_login
 from .proxy import get_new_proxy
-from .utils import now
+from .utils import now, stop_threads
+from .extra import StoppableThread
 
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,13 @@ log = logging.getLogger(__name__)
 def captcha_overseer_thread(args, account_queue, account_captchas,
                             key_scheduler, wh_queue):
     solverId = 0
-    while True:
+    thread = threading.current_thread()
+
+    # Threads to stop afterwards.
+    solver_thread = None
+
+    # The forever loop.
+    while not thread.stopped():
         # Run once every 15 seconds.
         sleep_timer = 15
 
@@ -52,12 +59,15 @@ def captcha_overseer_thread(args, account_queue, account_captchas,
                 if args.hash_key:
                     hash_key = key_scheduler.next()
 
-                t = Thread(target=captcha_solver_thread,
-                           name='captcha-solver-{}'.format(solverId),
-                           args=(args, account_queue, account_captchas,
-                                 hash_key, wh_queue, tokens[i]))
-                t.daemon = True
-                t.start()
+                solver_thread = StoppableThread(
+                    target=captcha_solver_thread,
+                    name='captcha-solver-{}'.format(
+                        solverId),
+                    args=(args, account_queue,
+                          account_captchas,
+                          hash_key, wh_queue, tokens[i]))
+                solver_thread.daemon = True
+                solver_thread.start()
 
                 solverId += 1
                 if solverId > 999:
@@ -86,10 +96,12 @@ def captcha_overseer_thread(args, account_queue, account_captchas,
                         if args.hash_key:
                             hash_key = key_scheduler.next()
 
-                        t = Thread(target=captcha_solver_thread,
-                                   name='captcha-solver-{}'.format(solverId),
-                                   args=(args, account_queue, account_captchas,
-                                         hash_key, wh_queue))
+                        t = threading.Thread(target=captcha_solver_thread,
+                                             name='captcha-solver-{}'.format(
+                                                 solverId),
+                                             args=(args, account_queue,
+                                                   account_captchas,
+                                                   hash_key, wh_queue))
                         t.daemon = True
                         t.start()
 
@@ -103,13 +115,16 @@ def captcha_overseer_thread(args, account_queue, account_captchas,
 
         time.sleep(sleep_timer)
 
+    # Graceful stop.
+    stop_threads(solver_thread)
+
 
 def captcha_solver_thread(args, account_queue, account_captchas, hash_key,
                           wh_queue, token=None):
     status, account, captcha_url = account_captchas.popleft()
 
     status['message'] = 'Waking up account {} to verify captcha token.'.format(
-                         account['username'])
+        account['username'])
     log.info(status['message'])
 
     if args.mock != '':
@@ -186,7 +201,7 @@ def handle_captcha(args, status, api, account, account_failures,
             if not args.captcha_solving:
                 status['message'] = ('Account {} has encountered a captcha. ' +
                                      'Putting account away.').format(
-                                        account['username'])
+                    account['username'])
                 log.warning(status['message'])
                 account_failures.append({
                     'account': account,
@@ -208,14 +223,14 @@ def handle_captcha(args, status, api, account, account_failures,
                     return True
                 else:
                     account_failures.append({
-                       'account': account,
-                       'last_fail_time': now(),
-                       'reason': 'captcha failed to verify'})
+                        'account': account,
+                        'last_fail_time': now(),
+                        'reason': 'captcha failed to verify'})
                     return False
             else:
                 status['message'] = ('Account {} has encountered a captcha. ' +
                                      'Waiting for token.').format(
-                                        account['username'])
+                    account['username'])
                 log.warning(status['message'])
                 account['last_active'] = datetime.utcnow()
                 account['last_location'] = step_location

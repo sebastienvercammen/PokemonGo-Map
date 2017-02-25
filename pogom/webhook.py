@@ -54,8 +54,10 @@ def wh_updater(args, queue, key_cache):
     # connection, giving a performance increase.
     session = __get_requests_session(args)
 
+    thread = threading.current_thread()
+
     # The forever loop.
-    while True:
+    while not thread.stopped():
         try:
             # Loop the queue.
             whtype, message = queue.get()

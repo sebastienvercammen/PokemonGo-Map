@@ -10,6 +10,7 @@ import gc
 import time
 import geopy
 import math
+import threading
 from peewee import InsertQuery, \
     Check, CompositeKey, ForeignKeyField, \
     IntegerField, CharField, DoubleField, BooleanField, \
@@ -1180,6 +1181,8 @@ class WorkerStatus(BaseModel):
                     'longitude': loc[1] if loc else None
                 }
                 break
+            except (KeyboardInterrupt, SystemExit):
+                raise
             except Exception as e:
                 log.error('Exception in get_worker under account {}.  '
                           'Exception message: {}'.format(username, repr(e)))
@@ -2219,8 +2222,10 @@ def parse_gyms(args, gym_responses, wh_update_queue, db_update_queue):
 
 
 def db_updater(args, q, db):
+    thread = threading.current_thread()
+
     # The forever loop.
-    while True:
+    while not thread.stopped():
         try:
 
             while True:
@@ -2257,7 +2262,10 @@ def db_updater(args, q, db):
 
 
 def clean_db_loop(args):
-    while True:
+    thread = threading.current_thread()
+
+    # The forever loop.
+    while not thread.stopped():
         try:
             query = (MainWorker
                      .delete()
