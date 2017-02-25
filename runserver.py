@@ -367,10 +367,6 @@ def main():
         # Graceful stop.
         log.debug('Stopping gracefully...')
 
-        # Pause scanner.
-        pause_bit.set()
-        log.debug('[GRACE] Set pause bit.')
-
         # Unset threads, in reverse order of importance.
         log.debug('[GRACE] Stopping proxy refresher thread...')
         stop_threads(proxy_refresher_thread)
