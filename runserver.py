@@ -102,7 +102,8 @@ def install_thread_excepthook():
     def run(*args, **kwargs):
         try:
             run_old(*args, **kwargs)
-        except (KeyboardInterrupt, SystemExit):
+        except (KeyboardInterrupt, SystemExit, EOFError):
+            # EOFError happens in status_printer's raw_input on CTRL+C.
             raise
         except:
             sys.excepthook(*sys.exc_info())

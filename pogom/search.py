@@ -77,8 +77,8 @@ def switch_status_printer(display_type, current_page, mainlog,
         # Wait for the user to press a key.
         try:
             command = raw_input()
-        except (KeyboardInterrupt, EOFError) as e:
-            raise e
+        except (KeyboardInterrupt, EOFError):
+            raise
 
         if command == '':
             # Switch between logging and display.
