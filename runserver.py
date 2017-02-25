@@ -88,6 +88,11 @@ if (not hasattr(pgoapi, "__version__") or
 
 
 # Patch to make exceptions in threads cause an exception.
+# Check if a thread had an unhandled exception caused by request for graceful
+# exit (e.g. CTRL+C). Used in our main procedure.
+thread_asking_graceful_stop = False
+
+
 def install_thread_excepthook():
     """
     Workaround for sys.excepthook thread bug
@@ -100,8 +105,14 @@ def install_thread_excepthook():
     run_old = Thread.run
 
     def run(*args, **kwargs):
+        global thread_asking_graceful_stop
+
         try:
             run_old(*args, **kwargs)
+        except (KeyboardInterrupt, SystemExit, EOFError):
+            # Handle CTRL+C.
+            thread_asking_graceful_stop = True
+            pass
         except:
             sys.excepthook(*sys.exc_info())
     Thread.run = run
@@ -351,30 +362,8 @@ def main():
     config['ROOT_PATH'] = app.root_path
     config['GMAPS_KEY'] = args.gmaps_key
 
-    try:
-        if args.no_server:
-            # This loop allows for ctrl-c interupts to work since flask won't
-            # hold the program open.
-            while search_thread.is_alive():
-                time.sleep(60)
-        else:
-            ssl_context = None
-            if (args.ssl_certificate and args.ssl_privatekey and
-                    os.path.exists(args.ssl_certificate) and
-                    os.path.exists(args.ssl_privatekey)):
-                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
-                ssl_context.load_cert_chain(
-                    args.ssl_certificate, args.ssl_privatekey)
-                log.info('Web server in SSL mode.')
-            if args.verbose or args.very_verbose:
-                app.run(threaded=True, use_reloader=False, debug=True,
-                        host=args.host, port=args.port,
-                        ssl_context=ssl_context)
-            else:
-                app.run(threaded=True, use_reloader=False, debug=False,
-                        host=args.host, port=args.port,
-                        ssl_context=ssl_context)
-    except (KeyboardInterrupt, SystemExit):
+    # Definition for scoping.
+    def graceful_stop():
         # Graceful stop.
         log.debug('Stopping gracefully...')
 
@@ -400,7 +389,41 @@ def main():
 
         log.debug('[GRACE] Graceful stop success.')
         sys.exit()
+
+    # Handle user interrupts.
+    # TODO: This try except is most likely unnecessary, as they installed
+    # some form of "exception patch" to handle unhandled exceptions in threads
+    # via an external handler. We need more testing to confirm all
+    # possible cases and leave only the handlers where needed.
+    try:
+        if args.no_server:
+            # This loop allows for ctrl-c interupts to work since flask won't
+            # hold the program open.
+            while not thread_asking_graceful_stop and search_thread.is_alive():
+                time.sleep(60)
+        else:
+            ssl_context = None
+            if (args.ssl_certificate and args.ssl_privatekey and
+                    os.path.exists(args.ssl_certificate) and
+                    os.path.exists(args.ssl_privatekey)):
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+                ssl_context.load_cert_chain(
+                    args.ssl_certificate, args.ssl_privatekey)
+                log.info('Web server in SSL mode.')
+            if args.verbose or args.very_verbose:
+                app.run(threaded=True, use_reloader=False, debug=True,
+                        host=args.host, port=args.port,
+                        ssl_context=ssl_context)
+            else:
+                app.run(threaded=True, use_reloader=False, debug=False,
+                        host=args.host, port=args.port,
+                        ssl_context=ssl_context)
+    except (KeyboardInterrupt, SystemExit):
+        graceful_stop()
         return  # Won't get here :)
+
+    # Graceful stop.
+    graceful_stop()
 
 
 if __name__ == '__main__':
