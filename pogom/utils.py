@@ -885,14 +885,18 @@ def extract_sprites():
 
 
 def stop_threads(t):
-    # If we're nothing or already stopped, we can't stop.
-    if not t or not t.is_alive():
+    # If we're nothing, we can't stop.
+    if not t:
         return
 
     # If we're a list, stop all individual ones.
     if isinstance(t, list):
         map(lambda x: stop_threads(x), t)
     else:
+        # If we're already stopped, we can't stop again.
+        if not t.is_alive():
+            return
+
         # Stop the thread & wait for it to have stopped.
         t.stop()
         t.join()
