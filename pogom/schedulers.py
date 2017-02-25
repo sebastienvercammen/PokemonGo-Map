@@ -505,10 +505,13 @@ class SpeedScan(HexSearch):
     # On location change, empty the current queue and the locations list
     def location_changed(self, scan_location, db_update_queue):
         super(SpeedScan, self).location_changed(scan_location, db_update_queue)
+
         self.locations = self._generate_locations()
+
         scans = {}
         initial = {}
         all_scans = {}
+
         for sl in ScannedLocation.select_in_hex(self.scan_location,
                                                 self.args.step_limit):
             all_scans[cellid((sl['latitude'], sl['longitude']))] = sl
@@ -528,17 +531,20 @@ class SpeedScan(HexSearch):
         self.band_status()
         spawnpoints = SpawnPoint.select_in_hex(
             self.scan_location, self.args.step_limit)
+
         if not spawnpoints:
             log.info('No spawnpoints in hex found in SpawnPoint table. ' +
                      'Doing initial scan.')
-        log.info('Found %d spawn points within hex', len(spawnpoints))
 
+        log.info('Found %d spawn points within hex', len(spawnpoints))
         log.info('Doing %s distance calcs to assign spawn points to scans',
                  "{:,}".format(len(spawnpoints) * len(scans)))
+
         scan_spawn_point = {}
         ScannedLocation.link_spawn_points(scans, initial, spawnpoints,
                                           self.step_distance, scan_spawn_point,
                                           force=True)
+
         if len(scan_spawn_point):
             log.info('%d relations found between the spawn points and steps',
                      len(scan_spawn_point))
@@ -605,6 +611,7 @@ class SpeedScan(HexSearch):
             altitude = get_altitude(self.args, location)
             generated_locations.append(
                 (step, (location[0], location[1], altitude), 0, 0))
+
         return generated_locations
 
     def getsize(self):
