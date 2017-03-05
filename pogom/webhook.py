@@ -107,7 +107,8 @@ def wh_updater(args, queue, key_cache, wh_session):
     kill_event = mp.Event()  # Triggers when a task needs to be renewed.
 
     # Start consumers.
-    consumers = [WebhookConsumer(mp_queue,
+    consumers = [WebhookConsumer(kill_event,
+                                 mp_queue,
                                  session,
                                  args.webhooks,
                                  args.wh_timeout,
