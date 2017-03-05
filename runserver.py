@@ -26,7 +26,7 @@ from pogom.altitude import get_gmaps_altitude
 from pogom.search import search_overseer_thread
 from pogom.models import (init_database, create_tables, drop_tables,
                           Pokemon, db_updater, clean_db_loop)
-from pogom.webhook import wh_updater
+from pogom.webhook import wh_updater, get_webhook_requests_session
 
 from pogom.proxy import check_proxies, proxies_refresher
 
@@ -280,11 +280,18 @@ def main():
     wh_updates_queue = Queue()
     wh_key_cache = LFUCache(maxsize=args.wh_lfu_size)
 
+    # Set up one session to use for all requests.
+    # Requests to the same host will reuse the underlying TCP
+    # connection, giving a performance increase.
+    wh_session = get_webhook_requests_session(args.wh_retries,
+                                              args.wh_backoff_factor,
+                                              args.wh_concurrency)
+
     # Thread to process webhook updates.
     for i in range(args.wh_threads):
         log.debug('Starting wh-updater worker thread %d', i)
         t = Thread(target=wh_updater, name='wh-updater-{}'.format(i),
-                   args=(args, wh_updates_queue, wh_key_cache))
+                   args=(args, wh_updates_queue, wh_key_cache, wh_session))
         t.daemon = True
         t.start()
 

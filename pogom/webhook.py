@@ -3,10 +3,10 @@
 
 import logging
 import requests
+import multiprocessing as mp
 from datetime import datetime
 from requests_futures.sessions import FuturesSession
 import threading
-from .utils import get_args
 from requests.packages.urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 
@@ -20,22 +20,68 @@ wh_threshold_lifetime = int(5 * (wh_warning_threshold / 100.0))
 wh_lock = threading.Lock()
 
 
-def send_to_webhook(session, message_type, message):
-    args = get_args()
+# TODO: Add logging.
+class WebhookConsumer(mp.Process):
 
-    if not args.webhooks:
+    def __init__(self, kill_event, task_queue, wh_session, webhooks,
+                 wh_timeout, max_tasks):
+        mp.Process.__init__(self)
+
+        self.task_queue = task_queue
+        self.kill_event = kill_event
+        self.webhooks = webhooks
+        self.wh_timeout = wh_timeout
+        self.max_tasks = max_tasks
+        self.running = True
+
+        self.tasks_finished = 0  # Task counter.
+
+        # Set up one session to use for all requests.
+        # Requests to the same host will reuse the underlying TCP
+        # connection, giving a performance increase.
+        self.session = wh_session
+
+    # Do work.
+    def run(self):
+        while self.running:
+            # Get a new message.
+            msg_type, message = self.task_queue.get()
+
+            # Send it off.
+            send_to_webhook(self.session,
+                            msg_type,
+                            message,
+                            self.webhooks,
+                            self.wh_timeout)
+
+            # Mark item as done.
+            self.task_queue.task_done()
+            self.tasks_finished += 1
+
+            # Renew if we've reached maximum tasks.
+            if self.tasks_finished == self.max_tasks:
+                self.running = False
+                self.kill_event.set()  # Notify parent.
+
+    # Tell the worker to stop.
+    def stop(self):
+        self.running = False
+
+
+def send_to_webhook(session, message_type, message, webhooks, wh_timeout):
+    if not webhooks:
         # What are you even doing here...
         log.warning('Called send_to_webhook() without webhooks.')
         return
 
-    req_timeout = args.wh_timeout
+    req_timeout = wh_timeout
 
     data = {
         'type': message_type,
         'message': message
     }
 
-    for w in args.webhooks:
+    for w in webhooks:
         try:
             session.post(w, json=data, timeout=(None, req_timeout),
                          background_callback=__wh_completed)
@@ -45,20 +91,63 @@ def send_to_webhook(session, message_type, message):
             log.exception(repr(e))
 
 
-def wh_updater(args, queue, key_cache):
+def wh_updater(args, queue, key_cache, wh_session):
     wh_threshold_timer = datetime.now()
     wh_over_threshold = False
 
     # Set up one session to use for all requests.
     # Requests to the same host will reuse the underlying TCP
     # connection, giving a performance increase.
-    session = __get_requests_session(args)
+    session = wh_session
+
+    # Use multiprocessing workers.
+    num_consumers = args.wh_consumers
+    max_tasks = args.wh_max_tasks
+    mp_queue = mp.Queue()  # Multiprocessing task queue.
+    kill_event = mp.Event()  # Triggers when a task needs to be renewed.
+
+    # Start consumers.
+    consumers = [WebhookConsumer(mp_queue,
+                                 session,
+                                 args.webhooks,
+                                 args.wh_timeout,
+                                 max_tasks)
+                 for i in xrange(num_consumers)]
+
+    for w in consumers:
+        w.start()
 
     # The forever loop.
     while True:
         try:
             # Loop the queue.
             whtype, message = queue.get()
+
+            # If it's time to renew processes, renew.
+            if kill_event.is_set():
+                num_dead_processes = 0
+
+                for w in consumers:
+                    # Only renew dead ones.
+                    if not w.is_alive():
+                        # Remove dead process from consumers & increment.
+                        consumers.remove(w)
+                        num_dead_processes += 1
+
+                # Add new processes.
+                for i in xrange(num_dead_processes):
+                    c = WebhookConsumer(mp_queue,
+                                        session,
+                                        args.webhooks,
+                                        args.wh_timeout,
+                                        max_tasks)
+                    c.start()
+
+                    # Add consumer to list.
+                    consumers.append(c)
+
+                # Reset flag.
+                kill_event.clear()
 
             # Extract the proper identifier.
             ident_fields = {
@@ -72,15 +161,15 @@ def wh_updater(args, queue, key_cache):
             with wh_lock:
                 # Only send if identifier isn't already in cache.
                 if ident is None:
-                    # We don't know what it is, so let's just log and send
-                    # as-is.
+                    # What it is isn't important, so let's just log and send
+                    # as is.
                     log.debug(
-                        'Sending webhook item of unknown type: %s.', whtype)
-                    send_to_webhook(session, whtype, message)
+                        'Sending webhook item of type: %s.', whtype)
+                    mp_queue.put((whtype, message))
                 elif ident not in key_cache:
                     key_cache[ident] = message
                     log.debug('Sending %s to webhook: %s.', whtype, ident)
-                    send_to_webhook(session, whtype, message)
+                    mp_queue.put((whtype, message))
                 else:
                     # Make sure to call key_cache[ident] in all branches so it
                     # updates the LFU usage count.
@@ -89,7 +178,7 @@ def wh_updater(args, queue, key_cache):
                     # data to webhooks.
                     if __wh_object_changed(whtype, key_cache[ident], message):
                         key_cache[ident] = message
-                        send_to_webhook(session, whtype, message)
+                        mp_queue.put((whtype, message))
                         log.debug('Sending updated %s to webhook: %s.',
                                   whtype, ident)
                     else:
@@ -116,6 +205,7 @@ def wh_updater(args, queue, key_cache):
                                     queue.qsize(),
                                     wh_threshold_lifetime)
 
+            # Flag item as done.
             queue.task_done()
         except Exception as e:
             log.exception('Exception in wh_updater: %s.', repr(e))
@@ -129,11 +219,12 @@ def __wh_completed():
     pass
 
 
-def __get_requests_session(args):
+def get_webhook_requests_session(wh_retries, wh_backoff_factor,
+                                 wh_concurrency):
     # Config / arg parser
-    num_retries = args.wh_retries
-    backoff_factor = args.wh_backoff_factor
-    pool_size = args.wh_concurrency
+    num_retries = wh_retries
+    backoff_factor = wh_backoff_factor
+    pool_size = wh_concurrency
 
     # Use requests & urllib3 to auto-retry.
     # If the backoff_factor is 0.1, then sleep() will sleep for [0.1s, 0.2s,

@@ -15,6 +15,7 @@ import socket
 import struct
 import zipfile
 import requests
+from multiprocessing import cpu_count
 from uuid import uuid4
 from s2sphere import CellId, LatLng
 
@@ -327,6 +328,14 @@ def get_args():
                         help=('Number of db threads; increase if the db ' +
                               'queue falls behind.'),
                         type=int, default=1)
+    parser.add_argument('--wh-consumers',
+                        help=('Number of child processes to use for'
+                              + ' webhook requests (per wh-thread).'),
+                        type=int, default=cpu_count() * 2)
+    parser.add_argument('--wh-max-tasks',
+                        help=('Max. number of tasks a consumer can'
+                              + ' process before restarting.'),
+                        type=int, default=2500)
     parser.add_argument('-wh', '--webhook',
                         help='Define URL(s) to POST webhook information to.',
                         default=None, dest='webhooks', action='append')
@@ -344,8 +353,8 @@ def get_args():
                               'webhook queue falls behind.'),
                         type=int, default=1)
     parser.add_argument('-whc', '--wh-concurrency',
-                        help=('Async requests pool size.'), type=int,
-                        default=25)
+                        help=('Async requests pool size (per instance).'),
+                        type=int, default=25)
     parser.add_argument('-whr', '--wh-retries',
                         help=('Number of times to retry sending webhook ' +
                               'data on failure.'),
