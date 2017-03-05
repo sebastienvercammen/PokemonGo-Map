@@ -55,7 +55,6 @@ class WebhookConsumer(mp.Process):
                             self.wh_timeout)
 
             # Mark item as done.
-            self.task_queue.task_done()
             self.tasks_finished += 1
 
             # Renew if we've reached maximum tasks.
